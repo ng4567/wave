@@ -6,9 +6,11 @@ enum DictationMode: String, CaseIterable {
     case toggle = "Toggle"
 }
 
-enum TranscriptionProvider: String {
+enum TranscriptionProvider: String, CaseIterable, Hashable {
     case local = "local"
     case groq = "groq"
+    case foundry = "foundry"
+    case mai = "mai"
 }
 
 enum AppStatus: Equatable {
@@ -63,7 +65,7 @@ final class AppState {
     var transcriptionProvider: TranscriptionProvider {
         didSet {
             UserDefaults.standard.set(transcriptionProvider.rawValue, forKey: "transcriptionProvider")
-            if transcriptionProvider == .groq {
+            if transcriptionProvider != .local {
                 transcriptionService.unloadModel()
                 isModelLoaded = false
             }
@@ -74,6 +76,27 @@ final class AppState {
     }
     var groqModel: String {
         didSet { UserDefaults.standard.set(groqModel, forKey: "groqModel") }
+    }
+    var foundryEndpoint: String {
+        didSet { UserDefaults.standard.set(foundryEndpoint, forKey: "foundryEndpoint") }
+    }
+    var foundryAPIKey: String {
+        didSet { UserDefaults.standard.set(foundryAPIKey, forKey: "foundryAPIKey") }
+    }
+    var foundryTranscriptionDeployment: String {
+        didSet { UserDefaults.standard.set(foundryTranscriptionDeployment, forKey: "foundryTranscriptionDeployment") }
+    }
+    var foundryChatDeployment: String {
+        didSet { UserDefaults.standard.set(foundryChatDeployment, forKey: "foundryChatDeployment") }
+    }
+    var maiEndpoint: String {
+        didSet { UserDefaults.standard.set(maiEndpoint, forKey: "maiEndpoint") }
+    }
+    var maiAPIKey: String {
+        didSet { UserDefaults.standard.set(maiAPIKey, forKey: "maiAPIKey") }
+    }
+    var maiModel: String {
+        didSet { UserDefaults.standard.set(maiModel, forKey: "maiModel") }
     }
     var transcriptionLanguage: String {
         didSet { UserDefaults.standard.set(transcriptionLanguage, forKey: "transcriptionLanguage") }
@@ -96,6 +119,12 @@ final class AppState {
     // MARK: - Groq
     var groqAPIStatus: GroqAPIStatus = .unknown
     var groqFetchedModels: [String] = []
+
+    // MARK: - Foundry
+    var foundryAPIStatus: GroqAPIStatus = .unknown
+
+    // MARK: - MAI
+    var maiAPIStatus: GroqAPIStatus = .unknown
 
     // MARK: - Usage (cumulative, persisted)
     var usagePromptTokens: Int {
@@ -141,6 +170,8 @@ final class AppState {
         switch transcriptionProvider {
         case .local: return isModelLoaded
         case .groq: return !groqAPIKey.isEmpty
+        case .foundry: return !foundryEndpoint.isEmpty && !foundryAPIKey.isEmpty && !foundryTranscriptionDeployment.isEmpty
+        case .mai: return !maiEndpoint.isEmpty && !maiAPIKey.isEmpty && !maiModel.isEmpty
         }
     }
 
@@ -183,6 +214,13 @@ final class AppState {
         transcriptionProvider = TranscriptionProvider(rawValue: UserDefaults.standard.string(forKey: "transcriptionProvider") ?? "") ?? .local
         groqAPIKey = UserDefaults.standard.string(forKey: "groqAPIKey") ?? ""
         groqModel = UserDefaults.standard.string(forKey: "groqModel") ?? "whisper-large-v3-turbo"
+        foundryEndpoint = UserDefaults.standard.string(forKey: "foundryEndpoint") ?? ""
+        foundryAPIKey = UserDefaults.standard.string(forKey: "foundryAPIKey") ?? ""
+        foundryTranscriptionDeployment = UserDefaults.standard.string(forKey: "foundryTranscriptionDeployment") ?? "whisper"
+        foundryChatDeployment = UserDefaults.standard.string(forKey: "foundryChatDeployment") ?? ""
+        maiEndpoint = UserDefaults.standard.string(forKey: "maiEndpoint") ?? ""
+        maiAPIKey = UserDefaults.standard.string(forKey: "maiAPIKey") ?? ""
+        maiModel = UserDefaults.standard.string(forKey: "maiModel") ?? "mai-transcribe-1.5"
         transcriptionLanguage = UserDefaults.standard.string(forKey: "transcriptionLanguage") ?? "auto"
         selectedMicUID = UserDefaults.standard.string(forKey: "selectedMicUID") ?? ""
         aiModeKeyCode = UInt16(UserDefaults.standard.integer(forKey: "aiModeKeyCode"))
@@ -233,6 +271,8 @@ final class AppState {
         Task {
             await loadSelectedModel()
             if !groqAPIKey.isEmpty { await verifyAndFetchGroqModels() }
+            if isFoundryConfigured { await verifyFoundry() }
+            if isMAIConfigured { await verifyMAI() }
             setupHotkey()
             await MainActor.run { startPersistentOverlay() }
         }
@@ -356,7 +396,7 @@ final class AppState {
 
     func startDictation() async {
         guard isReady else {
-            status = .error(transcriptionProvider == .groq ? "Groq API key required" : "No model loaded")
+            status = .error(providerReadinessError)
             try? await Task.sleep(for: .seconds(2))
             status = .idle
             return
@@ -410,11 +450,29 @@ final class AppState {
                 language: lang,
                 initialPrompt: prompt
             )
+        case .foundry:
+            transcribed = await transcriptionService.stopRecordingAndTranscribeWithFoundry(
+                endpoint: foundryEndpoint,
+                apiKey: foundryAPIKey,
+                deployment: foundryTranscriptionDeployment,
+                includePunctuation: includePunctuation,
+                language: lang,
+                initialPrompt: prompt
+            )
+        case .mai:
+            transcribed = await transcriptionService.stopRecordingAndTranscribeWithMAI(
+                endpoint: maiEndpoint,
+                apiKey: maiAPIKey,
+                model: maiModel,
+                includePunctuation: includePunctuation,
+                language: lang,
+                phraseList: customVocabulary
+            )
         }
         if muteSystemAudio { SystemAudioDucker.restore() }
 
         let text: String?
-        if isAIMode, let query = transcribed, !query.isEmpty, !groqAPIKey.isEmpty {
+        if isAIMode, let query = transcribed, !query.isEmpty {
             print("[wave] sending to AI: '\(query)'")
             var fullPrompt = llmSystemPrompt
             if !snippetManager.snippets.isEmpty {
@@ -425,13 +483,16 @@ final class AppState {
             if let context = selectedContext {
                 userMessage = "Selected text:\n\"\"\"\n\(context)\n\"\"\"\n\nInstruction: \(query)"
             }
-            let result = await transcriptionService.sendToAI(text: userMessage, apiKey: groqAPIKey, model: aiModel, systemPrompt: fullPrompt)
-            usagePromptTokens += result.promptTokens
-            usageCompletionTokens += result.completionTokens
-            usageTotalTokens += result.totalTokens
-            usageTotalTime += result.totalTime
-            usageRequestCount += 1
-            text = result.text
+            if let result = await sendCurrentProviderAI(text: userMessage, systemPrompt: fullPrompt) {
+                usagePromptTokens += result.promptTokens
+                usageCompletionTokens += result.completionTokens
+                usageTotalTokens += result.totalTokens
+                usageTotalTime += result.totalTime
+                usageRequestCount += 1
+                text = result.text
+            } else {
+                text = transcribed
+            }
         } else {
             text = transcribed
         }
@@ -516,6 +577,91 @@ final class AppState {
         }
     }
 
+    func verifyFoundry() async {
+        guard isFoundryConfigured else { foundryAPIStatus = .unknown; return }
+        foundryAPIStatus = .checking
+
+        guard let url = TranscriptionService.foundryOpenAIV1URL(endpoint: foundryEndpoint, path: "models") else {
+            foundryAPIStatus = .error("Invalid endpoint")
+            return
+        }
+        var request = URLRequest(url: url)
+        request.setValue(foundryAPIKey, forHTTPHeaderField: "api-key")
+
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                foundryAPIStatus = .error("Invalid settings")
+                return
+            }
+            foundryAPIStatus = .operational
+        } catch {
+            foundryAPIStatus = .error("Connection failed")
+        }
+    }
+
+    var isFoundryConfigured: Bool {
+        !foundryEndpoint.isEmpty && !foundryAPIKey.isEmpty && !foundryTranscriptionDeployment.isEmpty
+    }
+
+    func verifyMAI() async {
+        guard isMAIConfigured else { maiAPIStatus = .unknown; return }
+        maiAPIStatus = .checking
+
+        guard let url = TranscriptionService.maiTranscriptionURL(endpoint: maiEndpoint) else {
+            maiAPIStatus = .error("Invalid endpoint")
+            return
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue(maiAPIKey, forHTTPHeaderField: "Ocp-Apim-Subscription-Key")
+
+        let boundary = UUID().uuidString
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        let definition: [String: Any] = [
+            "enhancedMode": [
+                "enabled": true,
+                "model": maiModel
+            ]
+        ]
+        guard let definitionData = try? JSONSerialization.data(withJSONObject: definition),
+              let definitionString = String(data: definitionData, encoding: .utf8) else {
+            maiAPIStatus = .error("Invalid settings")
+            return
+        }
+
+        var body = Data()
+        func append(_ string: String) { body.append(string.data(using: .utf8)!) }
+        append("--\(boundary)\r\n")
+        append("Content-Disposition: form-data; name=\"definition\"\r\n\r\n")
+        append(definitionString)
+        append("\r\n")
+        append("--\(boundary)--\r\n")
+        request.httpBody = body
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                maiAPIStatus = .error("Connection failed")
+                return
+            }
+            if (200..<300).contains(http.statusCode) || String(data: data, encoding: .utf8)?.localizedCaseInsensitiveContains("Audio data must be provided") == true {
+                maiAPIStatus = .operational
+            } else if http.statusCode == 401 || http.statusCode == 403 {
+                maiAPIStatus = .error("Invalid API key")
+            } else {
+                maiAPIStatus = .error("Invalid settings")
+            }
+        } catch {
+            maiAPIStatus = .error("Connection failed")
+        }
+    }
+
+    var isMAIConfigured: Bool {
+        !maiEndpoint.isEmpty && !maiAPIKey.isEmpty && !maiModel.isEmpty
+    }
+
     func loadSelectedModel() async {
         guard let path = modelManager.selectedModelPath else { return }
         do {
@@ -527,6 +673,36 @@ final class AppState {
             status = .error("Failed to load model")
             try? await Task.sleep(for: .seconds(2))
             status = .idle
+        }
+    }
+
+    private var providerReadinessError: String {
+        switch transcriptionProvider {
+        case .local: return "No model loaded"
+        case .groq: return "Groq API key required"
+        case .foundry: return "Foundry settings required"
+        case .mai: return "MAI settings required"
+        }
+    }
+
+    private func sendCurrentProviderAI(text: String, systemPrompt: String) async -> TranscriptionService.AIResult? {
+        switch transcriptionProvider {
+        case .local:
+            return nil
+        case .groq:
+            guard !groqAPIKey.isEmpty else { return nil }
+            return await transcriptionService.sendToAI(text: text, apiKey: groqAPIKey, model: aiModel, systemPrompt: systemPrompt)
+        case .foundry:
+            guard !foundryEndpoint.isEmpty, !foundryAPIKey.isEmpty, !foundryChatDeployment.isEmpty else { return nil }
+            return await transcriptionService.sendToAIWithFoundry(
+                text: text,
+                endpoint: foundryEndpoint,
+                apiKey: foundryAPIKey,
+                deployment: foundryChatDeployment,
+                systemPrompt: systemPrompt
+            )
+        case .mai:
+            return nil
         }
     }
 

@@ -1,0 +1,24 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "location": {
+      "value": "eastus"
+    },
+    "foundryAccountName": {
+      "value": "wave-app-foundry"
+    },
+    "projectName": {
+      "value": "wave-app-project"
+    },
+    "apiKeyAuthPolicyAssignmentId": {
+      "value": "/providers/microsoft.management/managementgroups/229b41e3-f095-4314-bced-89e3e73c3adf/providers/microsoft.authorization/policyassignments/mcapsgovdeploypolicies"
+    },
+    "apiKeyAuthPolicyDefinitionReferenceId": {
+      "value": "CognitiveServicesDisableLocalAuth"
+    },
+    "policyExemptionRequestedBy": {
+      "value": "wave-app"
+    }
+  }
+}
