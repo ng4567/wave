@@ -21,10 +21,15 @@ struct ProviderPickerView: View {
 
             Divider()
 
-            if appState.transcriptionProvider == .local {
+            switch appState.transcriptionProvider {
+            case .local:
                 localContent
-            } else {
+            case .groq:
                 groqContent
+            case .foundry:
+                foundryContent
+            case .mai:
+                maiContent
             }
         }
         .padding()
@@ -80,6 +85,45 @@ struct ProviderPickerView: View {
             }
             .pickerStyle(.radioGroup)
             .labelsHidden()
+        }
+        .padding(.bottom, 8)
+    }
+
+    // MARK: - Foundry
+
+    @ViewBuilder
+    private var foundryContent: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Using deployment")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+                .textCase(.uppercase)
+            Text(appState.foundryTranscriptionDeployment.isEmpty ? "No transcription deployment selected" : appState.foundryTranscriptionDeployment)
+                .font(.system(size: 13, weight: .medium))
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
+            Text("Change the Foundry deployment name in Models settings.")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.bottom, 8)
+    }
+
+    // MARK: - MAI
+
+    @ViewBuilder
+    private var maiContent: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Using model")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+                .textCase(.uppercase)
+            Text(appState.maiModel.isEmpty ? "No MAI model selected" : appState.maiModel)
+                .font(.system(size: 13, weight: .medium))
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
         }
         .padding(.bottom, 8)
     }
