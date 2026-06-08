@@ -122,6 +122,8 @@ final class AppState {
 
     // MARK: - Foundry
     var foundryAPIStatus: GroqAPIStatus = .unknown
+    var isRunningAzureSetup = false
+    var azureSetupStatus: GroqAPIStatus = .unknown
 
     // MARK: - MAI
     var maiAPIStatus: GroqAPIStatus = .unknown
@@ -451,7 +453,7 @@ final class AppState {
                 initialPrompt: prompt
             )
         case .foundry:
-            transcribed = await transcriptionService.stopRecordingAndTranscribeWithFoundry(
+            var foundryTranscribed = await transcriptionService.stopRecordingAndTranscribeWithFoundry(
                 endpoint: foundryEndpoint,
                 apiKey: foundryAPIKey,
                 deployment: foundryTranscriptionDeployment,
@@ -459,6 +461,17 @@ final class AppState {
                 language: lang,
                 initialPrompt: prompt
             )
+            if foundryTranscribed == nil && isMAIConfigured {
+                foundryTranscribed = await transcriptionService.stopRecordingAndTranscribeWithMAI(
+                    endpoint: maiEndpoint,
+                    apiKey: maiAPIKey,
+                    model: maiModel,
+                    includePunctuation: includePunctuation,
+                    language: lang,
+                    phraseList: customVocabulary
+                )
+            }
+            transcribed = foundryTranscribed
         case .mai:
             transcribed = await transcriptionService.stopRecordingAndTranscribeWithMAI(
                 endpoint: maiEndpoint,
@@ -578,7 +591,7 @@ final class AppState {
     }
 
     func verifyFoundry() async {
-        guard isFoundryConfigured else { foundryAPIStatus = .unknown; return }
+        guard isFoundryEndpointConfigured else { foundryAPIStatus = .unknown; return }
         foundryAPIStatus = .checking
 
         guard let url = TranscriptionService.foundryOpenAIV1URL(endpoint: foundryEndpoint, path: "models") else {
@@ -602,6 +615,126 @@ final class AppState {
 
     var isFoundryConfigured: Bool {
         !foundryEndpoint.isEmpty && !foundryAPIKey.isEmpty && !foundryTranscriptionDeployment.isEmpty
+    }
+
+    var isFoundryEndpointConfigured: Bool {
+        !foundryEndpoint.isEmpty && !foundryAPIKey.isEmpty
+    }
+
+    func runFoundryDeploymentScript() {
+        guard !isRunningAzureSetup else { return }
+
+        let scriptURL = Self.foundryDeploymentScriptURL
+        let credentialsURL = Self.azureCredentialsURL
+
+        guard FileManager.default.fileExists(atPath: scriptURL.path) else {
+            azureSetupStatus = .error("Script not found")
+            return
+        }
+
+        isRunningAzureSetup = true
+        azureSetupStatus = .checking
+
+        Task {
+            let result = await Self.runScript(scriptURL: scriptURL, credentialsURL: credentialsURL)
+            guard result.exitCode == 0 else {
+                isRunningAzureSetup = false
+                azureSetupStatus = .error(Self.displayError(from: result.output))
+                return
+            }
+
+            do {
+                try importAzureCredentials(from: credentialsURL)
+                azureSetupStatus = .operational
+                isRunningAzureSetup = false
+                await verifyFoundry()
+                await verifyMAI()
+            } catch {
+                isRunningAzureSetup = false
+                azureSetupStatus = .error("Credentials import failed")
+            }
+        }
+    }
+
+    private func importAzureCredentials(from url: URL) throws {
+        let data = try Data(contentsOf: url)
+        let credentials = try JSONDecoder().decode(AzureCredentials.self, from: data)
+
+        guard !credentials.foundryEndpoint.isEmpty,
+              !credentials.foundryAPIKey.isEmpty,
+              !credentials.foundryChatDeployment.isEmpty,
+              !credentials.maiEndpoint.isEmpty,
+              !credentials.maiAPIKey.isEmpty else {
+            throw AzureSetupError.missingCredentials
+        }
+
+        foundryEndpoint = credentials.foundryEndpoint
+        foundryAPIKey = credentials.foundryAPIKey
+        foundryTranscriptionDeployment = credentials.foundryTranscriptionDeployment
+        foundryChatDeployment = credentials.foundryChatDeployment
+        maiEndpoint = credentials.maiEndpoint
+        maiAPIKey = credentials.maiAPIKey
+        maiModel = credentials.maiModel
+        transcriptionProvider = .foundry
+    }
+
+    private struct AzureCredentials: Decodable {
+        let foundryEndpoint: String
+        let foundryAPIKey: String
+        let foundryTranscriptionDeployment: String
+        let foundryChatDeployment: String
+        let maiEndpoint: String
+        let maiAPIKey: String
+        let maiModel: String
+    }
+
+    private enum AzureSetupError: Error {
+        case missingCredentials
+    }
+
+    private static var foundryDeploymentScriptURL: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("infra/deploy-foundry-wave-app.sh")
+    }
+
+    private static var azureCredentialsURL: URL {
+        FileManager.default
+            .homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Wave/azure-credentials.json")
+    }
+
+    private nonisolated static func runScript(scriptURL: URL, credentialsURL: URL) async -> (exitCode: Int32, output: String) {
+        await Task.detached {
+            let process = Process()
+            let pipe = Pipe()
+            var environment = ProcessInfo.processInfo.environment
+            environment["WAVE_AZURE_CREDENTIALS_FILE"] = credentialsURL.path
+
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+            process.arguments = ["bash", scriptURL.path, "--non-interactive"]
+            process.currentDirectoryURL = scriptURL.deletingLastPathComponent().deletingLastPathComponent()
+            process.environment = environment
+            process.standardOutput = pipe
+            process.standardError = pipe
+
+            do {
+                try process.run()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                return (process.terminationStatus, String(data: data, encoding: .utf8) ?? "")
+            } catch {
+                return (1, error.localizedDescription)
+            }
+        }.value
+    }
+
+    private nonisolated static func displayError(from output: String) -> String {
+        output
+            .split(whereSeparator: \.isNewline)
+            .last
+            .map(String.init) ?? "Azure setup failed"
     }
 
     func verifyMAI() async {

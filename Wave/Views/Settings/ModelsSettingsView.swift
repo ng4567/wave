@@ -88,6 +88,8 @@ struct ModelsSettingsView: View {
 
                 if appState.transcriptionProvider == .foundry {
                     section("Foundry") {
+                        azureSetupRow
+
                         fieldRow("Endpoint", placeholder: "https://resource.openai.azure.com", text: Binding(
                             get: { appState.foundryEndpoint },
                             set: { appState.foundryEndpoint = $0 }
@@ -136,11 +138,11 @@ struct ModelsSettingsView: View {
                                 .background(Color.brand.opacity(0.15), in: RoundedRectangle(cornerRadius: 7))
                                 .foregroundStyle(Color.brand)
                                 .buttonStyle(.plain)
-                                .disabled(!appState.isFoundryConfigured || appState.foundryAPIStatus == .checking)
+                                .disabled(!appState.isFoundryEndpointConfigured || appState.foundryAPIStatus == .checking)
                             }
                         }
 
-                        foundryStatusView
+                        foundryTestRow
                     }
                 }
 
@@ -279,6 +281,74 @@ struct ModelsSettingsView: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.red)
             }
+        }
+    }
+
+    @ViewBuilder
+    private var foundryTestRow: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "checkmark.seal")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .frame(width: 16)
+            Text("Endpoint")
+                .font(.system(size: 13, weight: .medium))
+            Spacer()
+            foundryStatusView
+            Button("Test") {
+                Task { await appState.verifyFoundry() }
+            }
+            .font(.system(size: 12, weight: .medium, design: .rounded))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+            .buttonStyle(.plain)
+            .disabled(!appState.isFoundryEndpointConfigured || appState.foundryAPIStatus == .checking)
+        }
+        .padding(10)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    @ViewBuilder
+    private var azureSetupRow: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "cloud")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .frame(width: 16)
+            Text("Azure Setup")
+                .font(.system(size: 13, weight: .medium))
+            Spacer()
+            azureSetupStatusView
+            Button(appState.isRunningAzureSetup ? "Running..." : "Run") {
+                appState.runFoundryDeploymentScript()
+            }
+            .font(.system(size: 12, weight: .semibold, design: .rounded))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(Color.brand.opacity(0.15), in: RoundedRectangle(cornerRadius: 7))
+            .foregroundStyle(Color.brand)
+            .buttonStyle(.plain)
+            .disabled(appState.isRunningAzureSetup)
+        }
+        .padding(10)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    @ViewBuilder
+    private var azureSetupStatusView: some View {
+        switch appState.azureSetupStatus {
+        case .unknown:
+            EmptyView()
+        case .checking:
+            ProgressView().scaleEffect(0.6).frame(width: 8, height: 8)
+        case .operational:
+            Circle().fill(.green).frame(width: 6, height: 6)
+        case .error(let msg):
+            Text(msg)
+                .font(.system(size: 11))
+                .foregroundStyle(.red)
+                .lineLimit(1)
         }
     }
 

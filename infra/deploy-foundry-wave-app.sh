@@ -5,7 +5,9 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 template_file="$script_dir/foundry-wave-app.bicep"
 parameters_file="$script_dir/foundry-wave-app.parameters.json"
 resource_group="${AZURE_RESOURCE_GROUP:-standard-rg}"
+credentials_file="${WAVE_AZURE_CREDENTIALS_FILE:-$HOME/Library/Application Support/Wave/azure-credentials.json}"
 validate_only=false
+non_interactive=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -13,8 +15,12 @@ while [[ $# -gt 0 ]]; do
       validate_only=true
       shift
       ;;
+    --non-interactive)
+      non_interactive=true
+      shift
+      ;;
     -h|--help)
-      echo "Usage: $0 [--validate-only] [resource-group]"
+      echo "Usage: $0 [--validate-only] [--non-interactive] [resource-group]"
       exit 0
       ;;
     *)
@@ -40,6 +46,11 @@ fi
 
 if ! az account show >/dev/null 2>&1; then
   echo "Azure CLI is installed, but you are not signed in."
+  if [[ "$non_interactive" == true ]]; then
+    echo "Run 'az login' in Terminal, then run this script again."
+    exit 1
+  fi
+
   read -r -p "Run 'az login' now? [Y/n] " login_choice
 
   case "$login_choice" in
@@ -87,10 +98,12 @@ az resource update \
   --output none
 
 echo "Verifying endpoints and API credentials..."
-az cognitiveservices account show \
+account_json="$(az cognitiveservices account show \
   --resource-group "$resource_group" \
   --name "$foundry_account_name" \
-  --output json |
+  --output json)"
+
+echo "$account_json" |
   jq '{
     name,
     location,
@@ -103,8 +116,36 @@ az cognitiveservices account show \
     speechEndpoint: .properties.endpoints["Speech Services Speech to Text 2025-10-15"]
   }'
 
-az cognitiveservices account keys list \
+keys_json="$(az cognitiveservices account keys list \
   --resource-group "$resource_group" \
   --name "$foundry_account_name" \
-  --query "{hasKey1:key1 != '',hasKey2:key2 != '',key1Length:length(key1),key2Length:length(key2)}" \
-  --output json
+  --output json)"
+
+echo "$keys_json" |
+  jq '{hasKey1: (.key1 != ""), hasKey2: (.key2 != ""), key1Length: (.key1 | length), key2Length: (.key2 | length)}'
+
+mkdir -p "$(dirname "$credentials_file")"
+chmod 700 "$(dirname "$credentials_file")"
+
+first_chat_deployment="$(jq -r 'try .parameters.modelDeployments.value[0].deploymentName catch "gpt-5-4-mini" // "gpt-5-4-mini"' "$parameters_file")"
+
+jq -n \
+  --arg foundryEndpoint "$(echo "$account_json" | jq -r '.properties.endpoints["Azure OpenAI Legacy API - Latest moniker"] // ""')" \
+  --arg foundryAPIKey "$(echo "$keys_json" | jq -r '.key1')" \
+  --arg foundryTranscriptionDeployment "whisper" \
+  --arg foundryChatDeployment "$first_chat_deployment" \
+  --arg maiEndpoint "$(echo "$account_json" | jq -r '.properties.endpoints["Speech Services Speech to Text 2025-10-15"] // .properties.endpoint // ""')" \
+  --arg maiAPIKey "$(echo "$keys_json" | jq -r '.key1')" \
+  --arg maiModel "mai-transcribe-1.5" \
+  '{
+    foundryEndpoint: $foundryEndpoint,
+    foundryAPIKey: $foundryAPIKey,
+    foundryTranscriptionDeployment: $foundryTranscriptionDeployment,
+    foundryChatDeployment: $foundryChatDeployment,
+    maiEndpoint: $maiEndpoint,
+    maiAPIKey: $maiAPIKey,
+    maiModel: $maiModel
+  }' > "$credentials_file"
+
+chmod 600 "$credentials_file"
+echo "Saved Wave Azure credentials to $credentials_file"
